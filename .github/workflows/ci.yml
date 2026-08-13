@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build, test (incl. fault-tolerance/partition/log-safety), demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo build --release
+        run: cargo build --release --verbose
+
+      - name: cargo test --release (unit + correctness tests)
+        # Includes leader election, fault tolerance (leader crash +
+        # re-election), network partition (minority can't commit, majority
+        # can, heals correctly), and log safety across successive leader
+        # changes. All scenarios are driven by the deterministic in-memory
+        # network simulator with fixed seeds -- no sleeps, no wall-clock
+        # races -- so this suite is not expected to be flaky. If a test
+        # ever *is* flaky in CI, the fix is a deterministic one (seed, tick
+        # budget), never disabling the test.
+        run: cargo test --release --verbose
+
+      - name: Run the simulated-cluster demo
+        run: cargo run --release --bin raft-demo
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: raft-demo-linux-x86_64
+          path: target/release/raft-demo
+
+  bench-smoke:
+    name: Benchmark smoke test
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo bench (smoke mode -- quick pass, not for reported numbers)
+        # --test runs every benchmark exactly once (no statistical
+        # sampling) purely to prove the bench harness compiles and every
+        # benchmark function executes without panicking on CI hardware. The
+        # throughput/latency numbers quoted in the README are from a real,
+        # full `cargo bench` run on the development machine, not from CI
+        # (shared CI runners are not a stable/repeatable benchmark
+        # environment) -- see the README's "Benchmarks" section.
+        run: cargo bench --bench raft_bench -- --test
+
+  docker:
+    name: Docker build + run
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary on the host runner (see Dockerfile comment)
+        run: |
+          cargo build --release --bin raft-demo
+          mkdir -p dist
+          cp target/release/raft-demo dist/raft-demo
+
+      - name: docker build
+        run: docker build -t raft-consensus:ci .
+
+      - name: docker run (must exit 0 -- the simulated cluster demo must succeed)
+        run: docker run --rm raft-consensus:ci
+
+  fmt-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings

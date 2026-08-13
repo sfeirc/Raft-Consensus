@@ -1,0 +1,31 @@
+[package]
+name = "raft-consensus"
+version = "0.1.0"
+edition = "2021"
+description = "A from-scratch Raft consensus implementation (leader election, log replication, membership-free single-cluster safety) with a deterministic in-memory network simulator for correctness testing."
+license = "MIT"
+repository = "https://github.com/sfeirc/Raft-Consensus"
+readme = "README.md"
+keywords = ["raft", "consensus", "distributed-systems", "replication"]
+categories = ["algorithms", "network-programming"]
+
+[lib]
+name = "raft_consensus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "raft-demo"
+path = "src/bin/demo.rs"
+
+[dependencies]
+rand = "0.8"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "raft_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
