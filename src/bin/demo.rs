@@ -71,15 +71,19 @@ fn main() {
     print_states(&cluster);
 
     println!("\n[3] Crashing the leader (node {leader1}) ...");
+    let remaining: Vec<u64> = all.iter().copied().filter(|&id| id != leader1).collect();
     cluster.disconnect(leader1);
+    // Look for a leader specifically among the reachable nodes: the crashed
+    // node legitimately keeps believing it's still leader in its old term
+    // (correct Raft behavior, not a bug), so naively asking "who is the
+    // current leader" is ambiguous while both self-proclaimed leaders exist
+    // at once.
     let mut leader2 = None;
     for _ in 0..300 {
         cluster.tick();
-        if let Some(l) = cluster.current_leader() {
-            if l != leader1 {
-                leader2 = Some(l);
-                break;
-            }
+        if let Some(l) = cluster.leader_among(&remaining) {
+            leader2 = Some(l);
+            break;
         }
     }
     let leader2 = leader2.expect("a new leader must be elected after the crash");
@@ -92,7 +96,6 @@ fn main() {
     let idx2 = cluster
         .propose(leader2, set("failover", "confirmed"))
         .expect("new leader accepts proposal");
-    let remaining: Vec<u64> = all.iter().copied().filter(|&id| id != leader1).collect();
     let ok = cluster.run_until_committed(&remaining, idx2, 300);
     assert!(ok, "surviving nodes must commit the new entry");
     println!("    state on the 4 surviving nodes:");

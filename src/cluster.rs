@@ -6,7 +6,7 @@
 //! this node, run for a while, assert every reachable node's state machine
 //! matches" in a few lines, entirely deterministically.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::node::{Committed, NotLeaderError, RaftConfig, RaftNode, RoleKind};
 use crate::rpc::{LogIndex, NodeId, Term};
@@ -15,16 +15,28 @@ use crate::state_machine::StateMachine;
 use crate::storage::{MemStorage, Storage};
 
 pub struct Cluster<SM: StateMachine> {
-    pub nodes: HashMap<NodeId, RaftNode<SM::Command, MemStorage<SM::Command>>>,
-    pub machines: HashMap<NodeId, SM>,
+    // `BTreeMap`, not `HashMap`, is load-bearing for determinism: Rust's
+    // default `HashMap` hasher is seeded randomly per process, so iterating
+    // `.values()`/`.keys()` visits nodes in a different order on every run
+    // (and definitely on every machine). `Cluster::tick()` enqueues each
+    // node's outgoing messages into the network in iteration order, and the
+    // network's shared RNG assigns latency in the order messages are sent
+    // -- so a random iteration order would make the "same seed = bit-for-
+    // bit reproducible" claim in the README false. `BTreeMap` iterates in
+    // ascending `NodeId` order deterministically, everywhere, always. This
+    // was caught by a real CI failure (the demo binary panicked on GitHub's
+    // runner but not locally) before this fix -- see the "Honest scope"
+    // section of the README for the full story.
+    pub nodes: BTreeMap<NodeId, RaftNode<SM::Command, MemStorage<SM::Command>>>,
+    pub machines: BTreeMap<NodeId, SM>,
     pub network: Network<SM::Command>,
     pub tick_count: u64,
 }
 
 impl<SM: StateMachine> Cluster<SM> {
     pub fn new(ids: &[NodeId], config: RaftConfig, net_config: NetworkConfig, seed: u64) -> Self {
-        let mut nodes = HashMap::new();
-        let mut machines = HashMap::new();
+        let mut nodes = BTreeMap::new();
+        let mut machines = BTreeMap::new();
         for &id in ids {
             let peers: Vec<NodeId> = ids.iter().copied().filter(|&p| p != id).collect();
             // Distinct-but-deterministic per-node seed: mixed with a large
@@ -108,12 +120,26 @@ impl<SM: StateMachine> Cluster<SM> {
     }
 
     /// Propose to whichever node currently believes it's the leader. Useful
-    /// in tests where "the" leader may have changed.
+    /// when no fault has been injected and there is exactly one plausible
+    /// leader. **Do not use this after disconnecting/crashing a node**: see
+    /// the caveat on [`Cluster::current_leader`] and prefer
+    /// [`Cluster::leader_among`] with an explicit reachable-node list.
     pub fn propose_via_current_leader(&mut self, command: SM::Command) -> Option<LogIndex> {
         let leader = self.current_leader()?;
         self.propose(leader, command).ok()
     }
 
+    /// The first node found to believe itself leader, in ascending `NodeId`
+    /// order (deterministic thanks to `nodes` being a `BTreeMap`).
+    ///
+    /// Safe to use only when at most one node can plausibly claim
+    /// leadership (e.g. right after `Cluster::new`, before any fault has
+    /// been injected). Once a node has been disconnected/"crashed", it
+    /// legitimately keeps believing it's still leader in its old term —
+    /// correct Raft behavior, not a bug — so more than one node can satisfy
+    /// `role() == Leader` at once and "the" current leader becomes
+    /// ambiguous. Use [`Cluster::leader_among`] with an explicit
+    /// known-reachable subset in any scenario involving a fault.
     pub fn current_leader(&self) -> Option<NodeId> {
         self.nodes
             .values()

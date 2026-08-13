@@ -334,9 +334,31 @@ mode, purely to catch a broken bench harness — the numbers above are from a
 real local run, not CI, since shared CI runners aren't a stable benchmark
 environment), **docker** (build + run, must exit 0), and **fmt-clippy**
 (`cargo fmt --check` + `cargo clippy --all-targets -- -D warnings`, zero
-warnings allowed). Verified green with `gh run watch` after pushing — see the
-badge at the top of this README and the "CI verification" note in the commit
-history.
+warnings allowed).
+
+**A real, non-flaky-workaround bug was caught and fixed by this exact CI
+process** before the badge went green, worth documenting rather than
+quietly erasing from history: the first push passed every local run but
+failed CI's "Run the simulated-cluster demo" step with a genuine panic. Root
+cause: `Cluster`'s node map was a `HashMap`, whose iteration order Rust seeds
+randomly *per process* — `Cluster::tick()` enqueues each node's outgoing
+messages into the network in that iteration order, and the network's shared
+RNG assigns latency in the order messages are sent, so a random iteration
+order silently broke the "same seed ⇒ bit-for-bit reproducible everywhere"
+claim this whole test strategy depends on. It happened to "work" across
+several manual local runs and failed on GitHub's runner because the two
+processes drew different random hash seeds — exactly the kind of
+environment-dependent flakiness the task of building this repo called out as
+something to fix at the root (a deterministic fix), not paper over. The fix:
+switch `Cluster::nodes`/`machines` to `BTreeMap` (deterministic, sorted
+iteration everywhere) and stop using the ambiguous "find *the* leader"
+helper once a node can be disconnected (a crashed node legitimately keeps
+claiming leadership in its old term — correct Raft behavior, not a bug — so
+"the" leader is ambiguous during a fault; see `Cluster::leader_among` and the
+doc comment on `Cluster::current_leader`). Verified afterwards by running the
+demo binary 8 times as independent OS processes and diffing the output
+byte-for-byte (identical every time), then re-pushed and verified green with
+`gh run watch` — see the badge at the top of this README.
 
 ## Honest scope / limitations
 
