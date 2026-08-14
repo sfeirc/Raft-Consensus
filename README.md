@@ -27,6 +27,27 @@ whiteboard sketch — companion to [`CRDT-DigitalTwin-Store`](https://github.com
 (replication via commutative merge, no coordinator) and [`ICS-Modbus-IDS`](https://github.com/sfeirc/ICS-Modbus-IDS)
 in a small portfolio of systems-level work.
 
+### Why this matters across industries
+
+Strip away the specific systems named above and what's left is a general
+problem: how a handful of independent machines agree on a single ordered
+history of events when any one of them can crash or get cut off from the
+network, without ever disagreeing about what actually happened. That shape
+of problem — not this specific codebase, but the mechanism it implements —
+shows up anywhere a system has to keep working, consistently, when a
+component fails: a trading or order-management system that must fail over
+to a backup node without either losing an acknowledged order or replaying
+it twice (finance); any replicated backend service that claims to survive a
+node dying, which is most of what "highly available infrastructure" means
+in practice (tech); and industrial control setups where multiple redundant
+controllers must agree on which one is authoritative after a fault — the
+same agreement problem, just with programmable logic controllers standing
+in for database replicas (industrial/OT). This repository doesn't claim to
+run in any of those settings — it's a from-scratch implementation of the
+algorithm plus a test suite that adversarially exercises exactly the
+failure modes (leader crash, network partition, repeated leader turnover)
+that make "agreement under failure" hard in the first place.
+
 ## What this actually implements
 
 - **Leader election** (§5.2): randomized election timeouts, `RequestVote`
@@ -44,7 +65,7 @@ in a small portfolio of systems-level work.
   its own current term** has been replicated to a majority. Committing an
   older-term entry purely because a majority happens to have it is the
   precise hazard illustrated by Figure 8 in the paper, and it's
-  [tested directly and adversarially](#log-safety-the-property-raft-exists-to-guarantee) below.
+  [tested directly and adversarially](#5-log-safety-the-property-raft-exists-to-guarantee) below.
 - **A replicated state machine on top of the log**: a small key-value store
   (`Set`/`Delete`) that every node applies independently from its own copy of
   the committed log, used throughout the tests to prove the replicated log
@@ -101,6 +122,42 @@ consequence end-to-end (integration test) — see below.
 
 ## Architecture
 
+The runtime shape: each cluster member is an independent `RaftNode` (pure
+state machine, no I/O of its own), all of them exchanging RPCs only through
+the shared deterministic network simulator, with each node's committed
+entries fed into its own local state machine:
+
+```mermaid
+flowchart TB
+    subgraph Cluster["Cluster: one RaftNode + one StateMachine per node id (BTreeMap-keyed)"]
+        direction LR
+        R1["RaftNode 1<br/>Follower / Candidate / Leader"]
+        R2["RaftNode 2"]
+        R3["RaftNode 3..N"]
+        M1[("KvStore 1")]
+        M2[("KvStore 2")]
+        M3[("KvStore 3..N")]
+        R1 -.->|StepResult.committed| M1
+        R2 -.->|StepResult.committed| M2
+        R3 -.->|StepResult.committed| M3
+    end
+
+    Net["sim::Network<br/>min-heap queue by delivery tick<br/>seeded RNG: latency + drop probability<br/>partition / disconnect rules"]
+
+    R1 -->|Envelope out: RequestVote / AppendEntries + replies| Net
+    Net -->|advance_tick: due Envelope| R1
+    R2 --> Net
+    Net --> R2
+    R3 --> Net
+    Net --> R3
+
+    Driver["Cluster::tick() / Cluster::propose(cmd)"] --> R1
+    Driver --> R2
+    Driver --> R3
+```
+
+This maps onto the source layout as follows:
+
 ```
 src/
   rpc.rs            RequestVote / AppendEntries message types (transport-agnostic)
@@ -136,10 +193,13 @@ TLA+ Raft specification — not a shortcut invented for this repo.
 
 ## Correctness tests
 
-All in [`tests/correctness.rs`](tests/correctness.rs), run via `cargo test --release`
-(20/20 passing: 13 unit tests in `src/`, 7 integration tests). Every
-fault-injection scenario is seeded and tick-driven — no `sleep`, no
-wall-clock races.
+The scenarios below live in [`tests/correctness.rs`](tests/correctness.rs)
+(integration-level, driven through the real simulated network) except where
+noted otherwise — the log-safety rule is additionally exercised by a
+targeted adversarial unit test in `src/node.rs`. Run via
+`cargo test --release` (20/20 passing: 13 unit tests in `src/`, 7
+integration tests in `tests/correctness.rs`). Every fault-injection scenario
+is seeded and tick-driven — no `sleep`, no wall-clock races.
 
 ### 1. Leader election, no partition
 
